@@ -32,26 +32,30 @@
 
 
 unsigned char cmd[16];
-unsigned char* temp[64];
+unsigned char* tempHistory[32];
 unsigned char time[3];
+unsigned char log[15] = {[6] = ':', [7] = ' ', [8] = ' ', [13] = '\r', [14] = '\n'};
 unsigned char *hr = &time[0];
 unsigned char *min = &time[1];
 unsigned char *sec = &time[2];
-unsigned char outTime[6];
 
+// Queue points
+unsigned char start = 0, size = 0;
 
 char cmdPos = 0;
-unsigned long long int count = 0;
-unsigned char first, size, len = 64;
+unsigned char len = 64;
 static const char *err = "No temperatures recorded.";
 //unsigned char sec, min, hr;
 unsigned char flagCMD = 0, flagTIMER = 0;
+unsigned int adc_read;
 
 
 
 void commandHandler(void);
 void updateTime(void);
-void updatetim(void);
+void getTemp(void);
+void to_hex(unsigned int value);
+void getTime(void);
 
 main(void)
 {
@@ -67,7 +71,7 @@ main(void)
 
     P1DIR |= LED1 + LED2;
     P1OUT = 0;
-/*
+
     ADC10CTL0   &=  ENC;
 
     ADC10CTL0   =   SREF_1          // V_ref+ and V_ss as references
@@ -79,7 +83,7 @@ main(void)
     ADC10CTL1   =   INCH_10         // temperature sensor channel
                     | ADC10DIV_2    // divide source clock by 2
                     | ADC10SSEL_3;  // use SMCLK
-*/
+
 
     timera_init();
     uart_init();
@@ -92,7 +96,6 @@ main(void)
 
         if ((cmdPos > 0) && (cmdPos <=16) && cmd[cmdPos - 1] == '\r' && flagCMD)
         {
-            P1OUT |= LED1;
             commandHandler();
             flagCMD = 0;
         }
@@ -117,14 +120,18 @@ void updateTime(void)
         (*min)++;
         *sec -= 60;
 
-        if(*min >= 60)
+        if(*min % 5 == 0)
+            getTemp();
         {
-            (*hr)++;
-            *min -= 60;
-
-            if(*hr >= 24)
+            if(*min >= 60)
             {
-                (*hr) -= 24;
+                (*hr)++;
+                *min -= 60;
+
+                if(*hr >= 24)
+                {
+                    (*hr) -= 24;
+                }
             }
         }
     }
@@ -140,12 +147,22 @@ void commandHandler(void)
         case 't':
         case 'T':
 
+            getTime();
+
             for (i = 0; i < 6; i++)
             {
                 IE2 |= UCA0TXIFG;
                 loop_until_bit_is_set(IFG2,(UCA0TXIFG));
-                UCA0TXBUF = outTime[i];
+                UCA0TXBUF = log[i];
             }
+
+            IE2 |= UCA0TXIFG;
+            loop_until_bit_is_set(IFG2,(UCA0TXIFG));
+            UCA0TXBUF = '\n';
+            IE2 |= UCA0TXIFG;
+            loop_until_bit_is_set(IFG2,(UCA0TXIFG));
+            UCA0TXBUF = '\r';
+
             IE2 &= ~UCA0TXIFG;
 
                 // ********************************//
@@ -157,7 +174,7 @@ void commandHandler(void)
         case 'S':
     //                P1OUT = LED1;
        //     P1OUT |= LED2;
-
+      //      P1OUT |= LED1;
             *hr  = (cmd[1] - '0') * 10 + cmd[2] - '0';
             *min = (cmd[3] - '0') * 10 + cmd[4] - '0';
             *sec = (cmd[5] - '0') * 10 + cmd[6] - '0';
@@ -186,6 +203,22 @@ void commandHandler(void)
                 IE2 &= ~UCA0TXIFG;
             }
 
+            else
+            {
+                for(i = 0; i < 15; i++)
+                {
+                    IE2 |= UCA0TXIFG;
+                    loop_until_bit_is_set(IFG2,(UCA0TXIFG));
+                    UCA0TXBUF = tempHistory[start][i];
+                }
+
+                IE2 &= ~UCA0TXIFG;
+
+                size--;
+                start++;
+
+            }
+
 
             break;
 
@@ -212,14 +245,47 @@ void commandHandler(void)
         IE2 |= UCA0RXIFG;
 }
 
-void transTime(void)
+void getTime(void)
 {
-    outTime[5] = (*sec) % 10 + '0';
-    outTime[4] = (*sec) / 10 + '0';
-    outTime[3] = (*min) % 10 + '0';
-    outTime[2] = (*min) / 10 + '0';
-    outTime[1] = (*hr)  % 10 + '0';
-    outTime[0] = (*hr)  / 10 + '0';
+    log[5] = (*sec) % 10 + '0';
+    log[4] = (*sec) / 10 + '0';
+    log[3] = (*min) % 10 + '0';
+    log[2] = (*min) / 10 + '0';
+    log[1] = (*hr)  % 10 + '0';
+    log[0] = (*hr)  / 10 + '0';
+}
+
+void getTemp(void)
+{
+    P1OUT = LED1;
+
+    ADC10CTL0   |=  ENC         /* enable conversion */
+                | ADC10SC;  /* start conversion */
+            /* wait for conversion to finish */
+    loop_until_bit_is_set(ADC10CTL0, ADC10IFG);
+
+            /* grab value */
+    adc_read = ADC10MEM;
+
+            /* convert it to hexadecimal */
+    to_hex(adc_read);
+
+    getTime();
+
+    tempHistory[(start - size) % 32] = log;
+    size++;
+}
+
+void to_hex(unsigned int value)
+{
+    char t;
+    size_t i;
+    for(i = 0; i < 4; i++)
+    {
+        t = value & 0xf;
+        value >>= 4;
+        log[12 - i] = (t < 10) ? (t + '0') : (t + 'a' - 10);
+    }
 }
 
 // Interrupt procedure when the UART transmit buffer is full
@@ -252,7 +318,7 @@ ISR(USCIAB0RX_VECTOR)
 
 ISR(TIMER0_A0_VECTOR)
 {
-    P1OUT |= LED2;
+  //  P1OUT |= LED2;
     // seconds!!!!!!!!!
     (*sec)++;
     flagTIMER = 1;
